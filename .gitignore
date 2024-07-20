@@ -1,3 +1,4 @@
-./testioDevices.cpp
-./testRecord.cpp
-./digitalWalkman
+/testioDevices.cpp
+/testRecord.cpp
+/digitalWalkman
+/.vscode
