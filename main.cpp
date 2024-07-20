@@ -2,22 +2,53 @@
 #include <iostream>
 
 #include <portaudio.h>
-#include <ncurses.h>
 
-#define SAMPLE_RATE 44100
-#define FRAMES_PER_BUFFER 512
+#define FRAMES_PER_BUFFER 256
 
-/* 
-    This routine will be called by the PortAudio engine when audio is needed.
-    It may be called at interrupt level on some machines so don't do anything
-    that could mess up the system like calling malloc() or free().
-*/ 
-static int patestCallback( 
-    const void *inputBuffer, void *outputBuffer,
-    unsigned long framesPerBuffer, const PaStreamCallbackTimeInfo* timeInfo,
-    PaStreamCallbackFlags statusFlags, void *userData 
-    ) {
-        return 0;
+typedef struct {
+    int frameIndex;
+    int maxFrameIndex;
+    int numChannels;
+    bool armed;
+    float *recordedSamples;
+} paTestData;
+
+static paTestData data;
+
+static int recordCallback( const void *inputBuffer, void *outputBuffer,
+                           unsigned long framesPerBuffer,
+                           const PaStreamCallbackTimeInfo* timeInfo,
+                           PaStreamCallbackFlags statusFlags,
+                           void *userData )
+{
+    paTestData *data = (paTestData*)userData;
+    const float *rptr = (const float*)inputBuffer;
+    float *wptr = &data->recordedSamples[data->frameIndex * data->numChannels];
+    long framesToCalc;
+    long i;
+
+    if (data->frameIndex + framesPerBuffer > data->maxFrameIndex) {
+        framesToCalc = data->maxFrameIndex - data->frameIndex;
+    } else {
+        framesToCalc = framesPerBuffer;
+    }
+
+    if (inputBuffer == NULL) {
+        for (i = 0; i < framesToCalc; i++) {
+            for (int j = 0; j < data->numChannels; j++) {
+                *wptr++ = 0.0f;
+            }
+        }
+    } else {
+        for (i = 0; i < framesToCalc; i++) {
+            for (int j = 0; j < data->numChannels; j++) {
+                *wptr++ = *rptr++;
+            }
+        }
+    }
+
+    data->frameIndex += framesToCalc;
+    return data->frameIndex >= data->maxFrameIndex ? paComplete : paContinue;
 }
 
 /* 
@@ -31,13 +62,152 @@ static void checkErr(PaError err) {
     }
 }
 
-void processCommand(char* command){
+/*
+    sets up audio recording
+*/
+void recordAudio(int inputDevice, int seconds){
+    PaStreamParameters inputParameters;
+    PaStream *stream;
+    PaError err;
+    int numSamples;
+    int numBytes;
+
+    //set number of channels
+    data.numChannels = Pa_GetDeviceInfo(inputDevice)->maxInputChannels;
+
+    //calculate number of frames
+    data.maxFrameIndex = seconds * Pa_GetDeviceInfo(inputDevice)->defaultSampleRate;
+    data.frameIndex = 0;
+
+    //calculate number of bytes that will be used in the recording based on seconds given
+    numSamples = data.maxFrameIndex * Pa_GetDeviceInfo(inputDevice)->maxInputChannels;
+    numBytes = numSamples * sizeof(float);
+    data.recordedSamples = (float *) malloc(numBytes);
+
+    if (data.recordedSamples == NULL) {
+        printf("Could not allocate memory for recording.\n");
+        exit(EXIT_FAILURE);
+    }
+    memset(data.recordedSamples, 0, numBytes);
+
+    inputParameters.device = inputDevice;
+    inputParameters.channelCount = Pa_GetDeviceInfo(inputDevice)->maxInputChannels;
+    inputParameters.sampleFormat = paFloat32;
+    inputParameters.suggestedLatency = Pa_GetDeviceInfo(inputParameters.device)->defaultLowInputLatency;
+    inputParameters.hostApiSpecificStreamInfo = NULL;
+
+    err = Pa_OpenStream(
+            &stream,
+            &inputParameters,
+            NULL, // no output
+            Pa_GetDeviceInfo(inputDevice)->defaultSampleRate,
+            FRAMES_PER_BUFFER,
+            paClipOff,
+            recordCallback,
+            &data);
+    checkErr(err);
+
+    printf("Recording for %d seconds...\n", seconds);
+
+    //start recording
+    err = Pa_StartStream(stream);
+    checkErr(err);
+
+    //wait for recording to end
+    while ((err = Pa_IsStreamActive(stream)) == 1) {
+        Pa_Sleep(1000);
+    }
+    checkErr(err);
+
+    //close recording
+    err = Pa_CloseStream(stream);
+    checkErr(err);
+
+    printf("Recording complete. You recorded %d seconds.\n", seconds);
+}
+
+static int playCallback( const void *inputBuffer, void *outputBuffer,
+                           unsigned long framesPerBuffer,
+                           const PaStreamCallbackTimeInfo* timeInfo,
+                           PaStreamCallbackFlags statusFlags,
+                           void *userData )
+{
+    paTestData *data = (paTestData*)userData;
+    float *rptr = &data->recordedSamples[data->frameIndex * data->numChannels];
+    float *wptr = (float*)outputBuffer;
+    unsigned int i;
+
+    for (i = 0; i < framesPerBuffer; i++) {
+        if (data->numChannels == 1) { // Mono recording
+            float sample = *rptr++;
+            *wptr++ = sample; // Left channel
+            *wptr++ = sample; // Right channel
+        } else {
+            for (int j = 0; j < data->numChannels; j++) {
+                *wptr++ = *rptr++;
+            }
+        }
+    }
+    data->frameIndex += framesPerBuffer;
+    if (data->frameIndex >= data->maxFrameIndex) {
+        return paComplete;
+    }
+    return paContinue;
+}
+
+void playAudio(int outputDevice){
+    PaStreamParameters outputParameters;
+    PaStream *stream;
+    PaError err;
+
+    //reset frameindex
+    data.frameIndex = 0;
+
+    outputParameters.device = outputDevice;
+    outputParameters.channelCount = 2;
+    outputParameters.sampleFormat = paFloat32;
+    outputParameters.suggestedLatency = Pa_GetDeviceInfo(outputDevice)->defaultLowOutputLatency;
+    outputParameters.hostApiSpecificStreamInfo = NULL;
+
+    err = Pa_OpenStream(
+            &stream,
+            NULL, // no input
+            &outputParameters,
+            Pa_GetDeviceInfo(outputDevice)->defaultSampleRate,
+            FRAMES_PER_BUFFER,
+            paClipOff,
+            playCallback,
+            &data);
+    checkErr(err);
+
+    printf("Playing back recorded audio...\n");
+    err = Pa_StartStream(stream);
+    checkErr(err);
+
+    while ((err = Pa_IsStreamActive(stream)) == 1) {
+        Pa_Sleep(1000);
+    }
+    checkErr(err);
+
+    err = Pa_CloseStream(stream);
+    checkErr(err);
+
+    printf("Playback complete.\n");
+}
+
+void processCommand(char* command, int inputDevice, int outputDevice){
     if (strcmp(command, "rec") == 0) {
-        printf("Recording...\n");
-        //TODO
+        printf("How many seconds would you like to record: ");
+        int seconds = 0;
+        scanf("%d", &seconds);
+        recordAudio(inputDevice, seconds);        
     } else if (strcmp(command, "play") == 0) {
-        printf("Playing...\n");
-        //TODO
+        if (data.recordedSamples != NULL) {
+            printf("Playing...\n");
+            playAudio(outputDevice);
+        } else {
+            printf("No recording available to play.\n");
+        }
     } else if (strcmp(command, "add") == 0) {
         printf("Adding...\n");
         //TODO
@@ -101,7 +271,7 @@ int main() {
             printf("Exiting...\n");
             break;
         }
-        processCommand(command);
+        processCommand(command, inputDevice, outputDevice);
     }
 
     err = Pa_Terminate();

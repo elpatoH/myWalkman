@@ -3,7 +3,6 @@
 
 # dependencies
 - PortAudio
-- ncurses
 
 # compile and run
 1. set makefile PORTAUDIOINCLUDEFOLDER variable to your specific portaudio/include location
